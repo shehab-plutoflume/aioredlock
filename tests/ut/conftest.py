@@ -1,7 +1,7 @@
 import asyncio
 import ssl
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 from unittest.mock import patch
 
 import pytest
@@ -35,17 +35,12 @@ def lock_manager_redis_patched():
         patch("aioredlock.algorithm.Redis") as mock_redis,
         patch("asyncio.sleep", dummy_sleep),
     ):
-        mock_redis.set_lock.return_value = asyncio.Future()
-        mock_redis.set_lock.return_value.set_result(0.005)
-        mock_redis.unset_lock.return_value = asyncio.Future()
-        mock_redis.unset_lock.return_value.set_result(0.005)
-        mock_redis.is_locked.return_value = asyncio.Future()
-        mock_redis.is_locked.return_value.set_result(False)
-        mock_redis.clear_connections.return_value = asyncio.Future()
-        mock_redis.clear_connections.return_value.set_result(MagicMock())
-        mock_redis.get_lock_ttl.return_value = asyncio.Future()
-        mock_redis.get_lock_ttl.return_value.set_result(
-            Lock(None, "resource_name", 1, -1, True)
+        mock_redis.set_lock = AsyncMock(return_value=0.005)
+        mock_redis.unset_lock = AsyncMock(return_value=0.005)
+        mock_redis.is_locked = AsyncMock(return_value=False)
+        mock_redis.clear_connections = AsyncMock()
+        mock_redis.get_lock_ttl = AsyncMock(
+            return_value=Lock(None, "resource_name", 1, -1, True)
         )
 
         lock_manager = Aioredlock(internal_lock_timeout=1.0)
@@ -81,11 +76,3 @@ def ssl_context():
     context = ssl.create_default_context()
     with patch("ssl.create_default_context", return_value=context):
         yield context
-
-
-@pytest.fixture
-def fake_coro():
-    async def func(thing):
-        return thing
-
-    return func

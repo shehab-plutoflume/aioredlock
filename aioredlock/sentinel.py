@@ -2,7 +2,7 @@ import re
 import ssl
 import urllib.parse
 
-from redis.asyncio.sentinel import Sentinel as create_sentinel
+from redis.asyncio import Sentinel as RedisSentinel, Redis as AIORedis
 
 
 class SentinelConfigError(Exception):
@@ -22,7 +22,6 @@ class Sentinel:
          * a Redis URI - "redis://host:6379/0?encoding=utf-8&master=mymaster";
          * a (host, port) tuple - ('localhost', 6379);
          * or a unix domain socket path string - "/path/to/redis.sock".
-         * a redis connection pool.
 
         :param connection:
             The connection address can be one of the following:
@@ -99,24 +98,23 @@ class Sentinel:
                 "Master name required for sentinel to be configured"
             )
 
-        kwargs["minsize"] = 1 if "minsize" not in kwargs else int(kwargs["minsize"])
-        kwargs["maxsize"] = 100 if "maxsize" not in kwargs else int(kwargs["maxsize"])
+        kwargs["max_connections"] = int(kwargs.get("max_connections", 100))
 
         self.connection = address
         self.redis_kwargs = kwargs
 
-    async def get_sentinel(self):
+    def get_sentinel(self):
         """
         Retrieve sentinel object from aioredis.
         """
-        return await create_sentinel(
+        return RedisSentinel(
             sentinels=self.connection,
             **self.redis_kwargs,
         )
 
-    async def get_master(self):
+    def get_master(self) -> AIORedis:
         """
         Get ``Redis`` instance for specified ``master``
         """
-        sentinel = await self.get_sentinel()
-        return await sentinel.master_for(self.master)
+        sentinel = self.get_sentinel()
+        return sentinel.master_for(self.master)

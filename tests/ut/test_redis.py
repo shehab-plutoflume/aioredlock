@@ -1,9 +1,9 @@
+from __future__ import annotations
 import asyncio
 import hashlib
-import sys
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import call, patch, AsyncMock, Mock, AsyncMockMixin
 
-from redis import asyncio as aioredis
+from redis.asyncio import ConnectionPool
 from redis.exceptions import ResponseError
 import pytest
 
@@ -12,7 +12,7 @@ from aioredlock.redis import Instance, Redis
 from aioredlock.sentinel import Sentinel
 
 
-def callculate_sha1(text):
+def calculate_sha1(text):
     sha1 = hashlib.sha1()
     sha1.update(text.encode())
     digest = sha1.hexdigest()
@@ -26,51 +26,48 @@ CONNECT_ERROR = OSError("ERROR")
 RANDOM_ERROR = Exception("FAULT")
 
 
-class FakePool:
+@pytest.fixture
+async def fake_client() -> FakeClient:
+    _fake_pool = FakeClient()
+    return _fake_pool
+
+
+class FakeClient(AsyncMockMixin):
     SET_IF_NOT_EXIST = "SET_IF_NOT_EXIST"
 
     def __init__(self):
+        super().__init__()
         self.script_cache = {}
-
-        self.evalsha = MagicMock(return_value=asyncio.Future())
-        self.evalsha.return_value.set_result(True)
-        self.get = MagicMock(return_value=asyncio.Future())
-        self.get.return_value.set_result(False)
-        self.script_load = MagicMock(side_effect=self._fake_script_load)
-        self.execute = MagicMock(side_effect=self._fake_execute)
-        self.close = MagicMock(return_value=asyncio.Future())
-        self.close.return_value.set_result(True)
-
-    def __await__(self):
-        yield
-        return self
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args, **kwargs):
-        pass
-
-    def __call__(self):
-        return self
+        self.connection_kwargs = {}
+        self.evalsha = AsyncMock(return_value=True)
+        self.get = AsyncMock(return_value=False)
+        self.script_load = AsyncMock(side_effect=self._fake_script_load)
+        self.execute_command = AsyncMock(side_effect=self._fake_execute_command)
+        self.aclose = AsyncMock(return_value=True)
+        self.release = AsyncMock()
 
     def is_fake(self):
         # Only for development purposes
         return True
 
-    async def _fake_script_load(self, script):
-        digest = callculate_sha1(script)
+    def _fake_script_load(self, script):
+        digest = calculate_sha1(script)
         self.script_cache[digest] = script
 
         return digest.encode()
 
-    async def _fake_execute(self, *args):
+    def _fake_execute_command(self, *args):
         cmd = b" ".join(args[:2])
         if cmd == b"SCRIPT LOAD":
-            return await self._fake_script_load(args[-1])
+            return self._fake_script_load(args[-1])
+
+    def _fake_execute(self, *args):
+        cmd = b" ".join(args[:2])
+        if cmd == b"SCRIPT LOAD":
+            return self._fake_script_load(args[-1])
 
 
-def fake_create_redis_pool(fake_pool):
+def fake_create_redis(fake_client):
     """
     Original Redis pool have magick method __await__ to create exclusive
     connection. MagicMock sees this method and thinks that Redis pool
@@ -79,10 +76,10 @@ def fake_create_redis_pool(fake_pool):
     instead of Mock.return_value.
     """
 
-    async def create_redis_pool(*args, **kwargs):
-        return fake_pool
+    async def create_redis(*args, **kwargs):
+        return fake_client
 
-    return create_redis_pool
+    return create_redis
 
 
 class TestInstance:
@@ -92,7 +89,7 @@ class TestInstance:
         instance = Instance(("localhost", 6379))
 
         assert instance.connection == ("localhost", 6379)
-        assert instance._pool is None
+        assert instance._client is None
         assert isinstance(instance._lock, asyncio.Lock)
 
         # scripts
@@ -100,13 +97,17 @@ class TestInstance:
             assert getattr(instance, "%s_sha1" % name.lower()) is None
 
     @pytest.mark.parametrize(
-        "connection, address, redis_kwargs",
+        "connection, expected_address, expected_kwargs",
         [
-            (("localhost", 6379), ("localhost", 6379), {}),
+            (
+                ("localhost", 6379),
+                None,
+                {"host": "localhost", "port": 6379, "db": 0, "password": None},
+            ),
             (
                 {"host": "localhost", "port": 6379, "db": 0, "password": "pass"},
-                ("localhost", 6379),
-                {"db": 0, "password": "pass"},
+                None,
+                {"host": "localhost", "port": 6379, "db": 0, "password": "pass"},
             ),
             (
                 "redis://host:6379/0?encoding=utf-8",
@@ -116,20 +117,23 @@ class TestInstance:
         ],
     )
     @pytest.mark.asyncio
-    async def test_connect_pool_not_created(self, connection, address, redis_kwargs):
-        with patch("aioredlock.redis.Instance._create_redis_pool") as create_redis_pool:
-            fake_pool = FakePool()
-            create_redis_pool.side_effect = fake_create_redis_pool(fake_pool)
+    async def test_connect_pool_not_created(
+        self, connection, expected_address, expected_kwargs, fake_client
+    ):
+        with patch(
+            "aioredlock.redis.Instance._create_redis",
+            AsyncMock(return_value=fake_client),
+        ) as create_redis_pool:
             instance = Instance(connection)
 
-            assert instance._pool is None
+            assert instance._client is None
             pool = await instance.connect()
 
             create_redis_pool.assert_called_once_with(
-                address, **redis_kwargs, minsize=1, maxsize=100
+                expected_address, **expected_kwargs, max_connections=100
             )
-            assert pool is fake_pool
-            assert instance._pool is fake_pool
+            assert pool is fake_client
+            assert instance._client is fake_client
 
             # scripts
             assert pool.script_load.call_count == len(self.script_names)
@@ -137,146 +141,134 @@ class TestInstance:
                 digest = getattr(instance, "%s_sha1" % name.lower())
                 assert digest
                 assert digest in pool.script_cache
-            await fake_pool.close()
+            await fake_client.aclose()
 
     @pytest.mark.asyncio
-    async def test_connect_pool_not_created_with_minsize_and_maxsize(self):
+    async def test_connect_pool_not_created_with_max_connections(self, fake_client):
         connection = {
             "host": "localhost",
             "port": 6379,
             "db": 0,
             "password": "pass",
-            "minsize": 2,
-            "maxsize": 5,
+            "max_connections": 5,
         }
-        address = ("localhost", 6379)
-        redis_kwargs = {"db": 0, "password": "pass"}
-        with patch("aioredlock.redis.Instance._create_redis_pool") as create_redis_pool:
-            fake_pool = FakePool()
-            create_redis_pool.side_effect = fake_create_redis_pool(fake_pool)
+        with patch(
+            "aioredlock.redis.Instance._create_redis",
+            AsyncMock(return_value=fake_client),
+        ) as create_redis_pool:
             instance = Instance(connection)
 
-            assert instance._pool is None
+            assert instance._client is None
             pool = await instance.connect()
 
-            create_redis_pool.assert_called_once_with(
-                address, **redis_kwargs, minsize=2, maxsize=5
-            )
-            assert pool is fake_pool
-            assert instance._pool is fake_pool
+            create_redis_pool.assert_called_once_with(None, **connection)
+            assert pool is fake_client
+            assert instance._client is fake_client
 
-    @pytest.mark.asyncio
-    async def test_connect_pool_already_created(self):
-        with patch("aioredlock.redis.Instance._create_redis_pool") as create_redis_pool:
+    async def test_connect_pool_already_created(self, fake_client):
+        with patch(
+            "aioredlock.redis.Instance._create_redis",
+            AsyncMock(return_value=fake_client),
+        ) as create_redis_pool:
             instance = Instance(("localhost", 6379))
-            fake_pool = FakePool()
-            instance._pool = fake_pool
-
+            fake_client = FakeClient()
+            instance._client = fake_client
             pool = await instance.connect()
 
             assert not create_redis_pool.called
-            assert pool is fake_pool
+            assert pool is fake_client
             assert pool.script_load.called is True
 
     @pytest.mark.asyncio
-    async def test_connect_pool_aioredis_instance(self):
-        def awaiter(self):
-            yield from []
+    async def test_connect_pool_aioredis_instance(self, mocker, fake_client):
+        pool = AsyncMock(spec=ConnectionPool)
+        pool.connection_kwargs = {
+        'host': 'localhost',
+        'port': 6379,
+        'db': 0,
+        'password': 'secret'
+        }
+        mocker.patch('redis.asyncio.ConnectionPool', return_value=pool)
 
-        pool = FakePool()
-        redis_connection = aioredis.Redis(pool)
-        instance = Instance(redis_connection)
+        mocker.patch("redis.asyncio.Redis.from_url", return_value=fake_client)
+        instance = Instance(pool)
 
-        assert instance._pool is None
+        assert instance._client is None
         await instance.connect()
-        assert pool.execute.call_count == len(self.script_names)
+        assert fake_client.script_load.call_count == len(self.script_names)
         assert instance.set_lock_script_sha1 is not None
         assert instance.unset_lock_script_sha1 is not None
 
     @pytest.mark.asyncio
-    async def test_connect_pool_aioredis_instance_with_sentinel(self):
+    async def test_connect_pool_aioredis_instance_with_sentinel(self, fake_client):
         sentinel = Sentinel(("127.0.0.1", 26379), master="leader")
-        pool = FakePool()
-        redis_connection = aioredis.Redis(pool)
-        with patch.object(
-            sentinel, "get_master", return_value=asyncio.Future()
-        ) as mock_redis:
-            if sys.version_info < (3, 8, 0):
-                mock_redis.return_value.set_result(redis_connection)
-            else:
-                mock_redis.return_value = redis_connection
+        with patch("redis.asyncio.Sentinel.master_for", Mock(return_value=fake_client)):
             instance = Instance(sentinel)
 
-            assert instance._pool is None
+            assert instance._client is None
             await instance.connect()
-        assert pool.execute.call_count == len(self.script_names)
+
+        assert fake_client.script_load.call_count == len(self.script_names)
         assert instance.set_lock_script_sha1 is not None
         assert instance.unset_lock_script_sha1 is not None
 
     @pytest.fixture
-    def fake_instance(self):
-        with patch("aioredlock.redis.Instance._create_redis_pool") as create_redis_pool:
-            fake_pool = FakePool()
-            create_redis_pool.side_effect = fake_create_redis_pool(fake_pool)
+    def fake_instance(self, fake_client):
+        with patch(
+            "aioredlock.redis.Instance._create_redis",
+            AsyncMock(return_value=fake_client),
+        ) as create_redis:
+            create_redis.side_effect = fake_create_redis(fake_client)
             instance = Instance(("localhost", 6379))
             yield instance
 
     @pytest.mark.asyncio
-    async def test_lock(self, fake_instance):
+    async def test_lock(self, fake_instance: Instance):
         instance = fake_instance
         await instance.connect()
-        pool = instance._pool
+        redis_client = instance._client
 
         await instance.set_lock("resource", "lock_id", 10.0)
 
-        pool.evalsha.assert_called_once_with(
-            **_setup_evalsha_call_args(
-                digest=instance.set_lock_script_sha1,
-                keys=["resource"],
-                args=["lock_id", 10000],
-            ).kwargs
+        redis_client.evalsha.assert_called_once_with(
+            instance.set_lock_script_sha1, 1, "resource", "lock_id", 10000
         )
 
     @pytest.mark.asyncio
-    async def test_get_lock_ttl(self, fake_instance):
+    async def test_get_lock_ttl(self, fake_instance: Instance):
         instance = fake_instance
         await instance.connect()
-        pool = instance._pool
+        redis_client = instance._client
 
         await instance.get_lock_ttl("resource", "lock_id")
-        pool.evalsha.assert_called_with(
-            **_setup_evalsha_call_args(
-                instance.get_lock_ttl_script_sha1, keys=["resource"], args=["lock_id"]
-            ).kwargs
+        redis_client.evalsha.assert_called_with(
+            instance.get_lock_ttl_script_sha1, 1, "resource", "lock_id"
         )
 
     @pytest.mark.asyncio
-    async def test_lock_sleep(self, fake_instance, event_loop):
+    async def test_lock_sleep(self, fake_instance: Instance):
+        loop = asyncio.get_running_loop()
         instance = fake_instance
 
         async def hold_lock(instance):
             async with instance._lock:
                 await asyncio.sleep(0.1)
-                instance._pool = FakePool()
+                instance._client = FakeClient()
 
-        event_loop.create_task(hold_lock(instance))
+        await loop.create_task(hold_lock(instance))
         await asyncio.sleep(0.1)
         await instance.connect()
-        pool = instance._pool
+        redis_client = instance._client
 
         await instance.set_lock("resource", "lock_id", 10.0)
 
-        pool.evalsha.assert_called_once_with(
-            **_setup_evalsha_call_args(
-                digest=instance.set_lock_script_sha1,
-                keys=["resource"],
-                args=["lock_id", 10000],
-            ).kwargs
+        redis_client.evalsha.assert_called_once_with(
+            instance.set_lock_script_sha1, 1, "resource", "lock_id", 10000
         )
 
-        instance._pool = None
-        await instance.close()
-        assert pool.close.called is False
+        instance._client = None
+        await instance.aclose()
+        assert redis_client.aclose.called is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -293,42 +285,38 @@ class TestInstance:
         ),
     )
     async def test_lock_without_scripts(
-        self, fake_coro, fake_instance, func, args, expected_keys, expected_args
+        self, fake_instance: Instance, func, args, expected_keys, expected_args
     ):
         instance = fake_instance
         await instance.connect()
-        pool = instance._pool
-        pool.evalsha.side_effect = [
+        redis_client = instance._client
+        redis_client.evalsha.side_effect = [
             ResponseError("NOSCRIPT"),
-            # aioredis.errors.ReplyError("NOSCRIPT"),
-            fake_coro(True),
+            AsyncMock(return_value=True),
         ]
 
         await getattr(instance, func)(*args)
 
-        assert pool.evalsha.call_count == 2
-        assert pool.script_load.call_count == 6  # for 3 scripts.
+        assert redis_client.evalsha.call_count == 2
+        assert redis_client.script_load.call_count == 6  # for 3 scripts.
 
-        pool.evalsha.assert_called_with(
-            **_setup_evalsha_call_args(
-                getattr(instance, "{0}_script_sha1".format(func)),
-                keys=expected_keys,
-                args=expected_args,
-            ).kwargs
+        redis_client.evalsha.assert_called_with(
+            getattr(instance, "{0}_script_sha1".format(func)),
+            1,
+            *expected_keys,
+            *expected_args,
         )
 
     @pytest.mark.asyncio
-    async def test_unset_lock(self, fake_instance):
+    async def test_unset_lock(self, fake_instance: Instance):
         instance = fake_instance
         await instance.connect()
-        pool = instance._pool
+        redis_client = instance._client
 
         await instance.unset_lock("resource", "lock_id")
 
-        pool.evalsha.assert_called_once_with(
-            **_setup_evalsha_call_args(
-                instance.unset_lock_script_sha1, keys=["resource"], args=["lock_id"]
-            ).kwargs
+        redis_client.evalsha.assert_called_once_with(
+            instance.unset_lock_script_sha1, 1, "resource", "lock_id"
         )
 
     @pytest.mark.asyncio
@@ -339,18 +327,17 @@ class TestInstance:
             (None, False),
         ],
     )
-    async def test_is_locked(self, fake_instance, get_return_value, locked):
+    async def test_is_locked(self, fake_instance: Instance, get_return_value, locked):
         instance = fake_instance
         await instance.connect()
-        pool = instance._pool
+        redis_client = instance._client
 
-        pool.get.return_value = asyncio.Future()
-        pool.get.return_value.set_result(get_return_value)
+        redis_client.get = AsyncMock(return_value=get_return_value)
 
         res = await instance.is_locked("resource")
 
         assert res == locked
-        pool.get.assert_called_once_with("resource")
+        redis_client.get.assert_called_once_with("resource")
 
 
 @pytest.fixture
@@ -368,34 +355,23 @@ def redis_three_connections():
 
 
 @pytest.fixture
-def mock_redis_two_instances(redis_two_connections):
-    pool = FakePool()
+def mock_redis_two_instances(redis_two_connections, fake_client):
     redis = Redis(redis_two_connections)
 
     for instance in redis.instances:
-        instance._pool = pool
+        instance._client = fake_client
 
-    yield redis, pool
+    return redis
 
 
 @pytest.fixture
-def mock_redis_three_instances(redis_three_connections):
-    pool = FakePool()
+def mock_redis_three_instances(redis_three_connections, fake_client):
     redis = Redis(redis_three_connections)
 
     for instance in redis.instances:
-        instance._pool = pool
+        instance._client = fake_client
 
-    yield redis, pool
-
-
-def _setup_evalsha_call_args(digest, keys, args):
-    return call(
-        digest,
-        len(keys),
-        *keys,
-        *args,
-    )
+    return redis
 
 
 class TestRedis:
@@ -415,16 +391,18 @@ class TestRedis:
     parametrize_methods = pytest.mark.parametrize(
         "method_name, call_args",
         [
-            ("set_lock", {"keys": ["resource"], "args": ["lock_id", 10000]}),
-            ("unset_lock", {"keys": ["resource"], "args": ["lock_id"]}),
-            ("get_lock_ttl", {"keys": ["resource"], "args": ["lock_id"]}),
+            ("set_lock", (1, "resource", "lock_id", 10000)),
+            ("unset_lock", (1, "resource", "lock_id")),
+            ("get_lock_ttl", (1, "resource", "lock_id")),
         ],
     )
 
     @pytest.mark.asyncio
     @parametrize_methods
-    async def test_lock(self, mock_redis_two_instances, method_name, call_args):
-        redis, pool = mock_redis_two_instances
+    async def test_lock(
+        self, mock_redis_two_instances, fake_client, method_name, call_args
+    ):
+        redis = mock_redis_two_instances
 
         method = getattr(redis, method_name)
 
@@ -432,8 +410,8 @@ class TestRedis:
 
         script_sha1 = getattr(redis.instances[0], "%s_script_sha1" % method_name)
 
-        calls = [_setup_evalsha_call_args(script_sha1, **call_args)] * 2
-        pool.evalsha.assert_has_calls(calls)
+        calls = [call(script_sha1, *call_args)] * 2
+        fake_client.evalsha.assert_has_calls(calls, any_order=True)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -443,25 +421,26 @@ class TestRedis:
             (None, False),
         ],
     )
-    async def test_is_locked(self, mock_redis_two_instances, get_return_value, locked):
-        redis, pool = mock_redis_two_instances
+    async def test_is_locked(
+        self, mock_redis_two_instances, fake_client, get_return_value, locked
+    ):
+        redis = mock_redis_two_instances
 
-        pool.get.return_value = asyncio.Future()
-        pool.get.return_value.set_result(get_return_value)
+        fake_client.get = AsyncMock(return_value=get_return_value)
 
         res = await redis.is_locked("resource")
 
         calls = [call("resource")] * 2
-        pool.get.assert_has_calls(calls)
+        fake_client.get.assert_has_calls(calls)
         assert res == locked
 
     @pytest.mark.asyncio
     @parametrize_methods
     async def test_lock_one_of_two_instances_failed(
-        self, fake_coro, mock_redis_two_instances, method_name, call_args
+        self, mock_redis_two_instances, fake_client, method_name, call_args
     ):
-        redis, pool = mock_redis_two_instances
-        pool.evalsha = MagicMock(side_effect=[EVAL_ERROR, EVAL_OK])
+        redis = mock_redis_two_instances
+        fake_client.evalsha = AsyncMock(side_effect=[EVAL_ERROR, EVAL_OK])
 
         method = getattr(redis, method_name)
 
@@ -470,8 +449,8 @@ class TestRedis:
 
         script_sha1 = getattr(redis.instances[0], "%s_script_sha1" % method_name)
 
-        calls = [_setup_evalsha_call_args(script_sha1, **call_args)] * 2
-        pool.evalsha.assert_has_calls(calls)
+        calls = [call(script_sha1, *call_args)] * 2
+        fake_client.evalsha.assert_has_calls(calls)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -488,19 +467,15 @@ class TestRedis:
     @parametrize_methods
     async def test_three_instances_combination(
         self,
-        fake_coro,
+        fake_client,
         mock_redis_three_instances,
         redis_result,
         success,
         method_name,
         call_args,
     ):
-        redis, pool = mock_redis_three_instances
-        redis_result = [
-            fake_coro(result) if isinstance(result, bytes) else result
-            for result in redis_result
-        ]
-        pool.evalsha = MagicMock(side_effect=redis_result)
+        redis = mock_redis_three_instances
+        fake_client.evalsha = AsyncMock(side_effect=redis_result)
 
         method = getattr(redis, method_name)
 
@@ -514,8 +489,8 @@ class TestRedis:
 
         script_sha1 = getattr(redis.instances[0], "%s_script_sha1" % method_name)
 
-        calls = [_setup_evalsha_call_args(script_sha1, **call_args)] * 3
-        pool.evalsha.assert_has_calls(calls)
+        calls = [call(script_sha1, *call_args)] * 3
+        fake_client.evalsha.assert_has_calls(calls)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -532,19 +507,15 @@ class TestRedis:
     @parametrize_methods
     async def test_three_instances_combination_errors(
         self,
-        fake_coro,
+        fake_client,
         mock_redis_three_instances,
         redis_result,
         error,
         method_name,
         call_args,
     ):
-        redis, pool = mock_redis_three_instances
-        redis_result = [
-            fake_coro(result) if isinstance(result, bytes) else result
-            for result in redis_result
-        ]
-        pool.evalsha = MagicMock(side_effect=redis_result)
+        redis = mock_redis_three_instances
+        fake_client.evalsha = AsyncMock(side_effect=redis_result)
 
         method = getattr(redis, method_name)
 
@@ -556,41 +527,30 @@ class TestRedis:
 
         script_sha1 = getattr(redis.instances[0], "%s_script_sha1" % method_name)
 
-        calls = [_setup_evalsha_call_args(script_sha1, **call_args)] * 3
-        pool.evalsha.assert_has_calls(calls)
+        calls = [call(script_sha1, *call_args)] * 3
+        fake_client.evalsha.assert_has_calls(calls)
 
     @pytest.mark.asyncio
-    async def test_clear_connections(self, mock_redis_two_instances):
-        redis, pool = mock_redis_two_instances
-        pool.close = MagicMock()
-        pool.wait_closed = MagicMock(return_value=asyncio.Future())
-        pool.wait_closed.return_value.set_result(True)
+    async def test_clear_connections(self, mock_redis_two_instances, fake_client):
+        redis = mock_redis_two_instances
+        fake_client.aclose = AsyncMock(return_value=True)
 
         await redis.clear_connections()
 
-        pool.close.assert_has_calls([call(), call()])
-        pool.wait_closed.assert_has_calls([call(), call()])
-
-        pool.close = MagicMock()
-        pool.wait_closed = MagicMock(return_value=asyncio.Future())
+        fake_client.aclose.assert_has_calls([call(), call()])
+        fake_client.aclose.reset_mock()
 
         await redis.clear_connections()
 
-        assert pool.close.called is False
+        assert fake_client.aclose.called is False
 
     @pytest.mark.asyncio
-    async def test_get_lock(
-        self,
-        mock_redis_two_instances,
-    ):
-        redis, pool = mock_redis_two_instances
+    async def test_get_lock(self, mock_redis_two_instances, fake_client):
+        redis = mock_redis_two_instances
 
         await redis.get_lock_ttl("resource", "lock_id")
 
         script_sha1 = getattr(redis.instances[0], "get_lock_ttl_script_sha1")
 
-        calls = [
-            _setup_evalsha_call_args(script_sha1, keys=["resource"], args=["lock_id"])
-        ]
-        pool.evalsha.assert_has_calls(calls)
-        # assert 0
+        calls = [call(script_sha1, 1, "resource", "lock_id")]
+        fake_client.evalsha.assert_has_calls(calls)

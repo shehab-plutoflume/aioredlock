@@ -230,7 +230,7 @@ class Aioredlock:
         """
         cancel all _watchdogs, unlock all locks and Clear all the redis connections
         """
-        self.log.debug("Destroying %s", repr(self))
+        self.log.debug("Destroying %s", self)
 
         for resource, lock in self._locks.copy().items():
             if lock.valid:

@@ -2,7 +2,7 @@ import asyncio
 import unittest.mock
 import uuid
 
-from redis import asyncio as aioredis
+from redis.asyncio import ConnectionPool, Redis as AIORedis
 import pytest
 
 from aioredlock import Aioredlock, LockError
@@ -95,8 +95,8 @@ class TestAioredlock:
     @pytest.mark.asyncio
     async def test_simple_aioredlock_one_instance_pool(self, redis_one_connection):
         address = "redis://{host}:{port}/{db}".format(**redis_one_connection[0])
-        pool = await aioredis.create_redis_pool(address=address, encoding="utf-8")
-        await self.check_simple_lock(Aioredlock([pool]))
+        client = ConnectionPool.from_url(address)
+        await self.check_simple_lock(Aioredlock([client]))
 
     @pytest.mark.asyncio
     async def test_aioredlock_two_locks_on_different_resources_one_instance(
@@ -138,8 +138,8 @@ class TestAioredlock:
         resource = str(uuid.uuid4())
         garbage_value = "garbage"
 
-        first_redis = await aioredis.create_redis(
-            (redis_two_connections[0]["host"], redis_two_connections[0]["port"])
+        first_redis = AIORedis.from_url(
+            f"redis://{redis_two_connections[0]['host']}:{redis_two_connections[0]['port']}/0"
         )
 
         # write garbage to resource key in first instance
@@ -147,7 +147,7 @@ class TestAioredlock:
         is_garbage = True
 
         # this patched sleep function will remove garbage from
-        # frist instance before second try
+        # first instance before second try
         real_sleep = asyncio.sleep
 
         async def fake_sleep(delay):
@@ -158,7 +158,6 @@ class TestAioredlock:
                 await first_redis.delete(resource)
                 is_garbage = False
 
-            # print('fake_sleep(%s), value %s' % (delay, value))
             await real_sleep(delay)
 
         # here we will try to lock while first redis instance still have
@@ -173,5 +172,4 @@ class TestAioredlock:
         assert lock.valid is False
 
         await lock_manager.destroy()
-        first_redis.close()
-        await first_redis.wait_closed()
+        await first_redis.close()

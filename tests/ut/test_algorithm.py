@@ -1,6 +1,6 @@
 import asyncio
 import sys
-from unittest.mock import ANY, call, MagicMock, patch
+from unittest.mock import ANY, call, MagicMock, AsyncMock, patch
 
 import pytest
 
@@ -124,12 +124,10 @@ class TestAioredlock:
         redis.unset_lock.assert_called_once_with("resource", ANY)
 
     @pytest.mark.asyncio
-    async def test_lock_one_timeout(
-        self, fake_coro, lock_manager_redis_patched, locked_lock
-    ):
+    async def test_lock_one_timeout(self, lock_manager_redis_patched, locked_lock):
         lock_manager, redis = lock_manager_redis_patched
 
-        redis.set_lock.side_effect = [fake_coro(1.5), fake_coro(0.001)]
+        redis.set_lock.side_effect = [1.5, 0.001]
 
         lock = await lock_manager.lock("resource", 1.0)
 
@@ -142,15 +140,11 @@ class TestAioredlock:
 
     @pytest.mark.asyncio
     async def test_lock_expire_retries_for_timeouts(
-        self, fake_coro, lock_manager_redis_patched, locked_lock
+        self, lock_manager_redis_patched, locked_lock
     ):
         lock_manager, redis = lock_manager_redis_patched
 
-        redis.set_lock.side_effect = [
-            fake_coro(1.100),
-            fake_coro(1.001),
-            fake_coro(2.000),
-        ]
+        redis.set_lock.side_effect = [1.100, 1.001, 2.000]
 
         with pytest.raises(LockError):
             await lock_manager.lock("resource", 1.0)
@@ -242,8 +236,7 @@ class TestAioredlock:
         self, lock_manager_redis_patched, locked_lock, by_resource, locked
     ):
         lock_manager, redis = lock_manager_redis_patched
-        redis.is_locked.return_value = asyncio.Future()
-        redis.is_locked.return_value.set_result(locked)
+        redis.is_locked = AsyncMock(return_value=locked)
 
         Lock.valid = locked
         resource = locked_lock.resource
@@ -290,12 +283,9 @@ class TestAioredlock:
     @pytest.mark.asyncio
     async def test_auto_extend(self):
         with patch("aioredlock.algorithm.Redis") as mock_redis:
-            mock_redis.set_lock.return_value = asyncio.Future()
-            mock_redis.set_lock.return_value.set_result(0.005)
-            mock_redis.unset_lock.return_value = asyncio.Future()
-            mock_redis.unset_lock.return_value.set_result(0.005)
-            mock_redis.clear_connections.return_value = asyncio.Future()
-            mock_redis.clear_connections.return_value.set_result(MagicMock())
+            mock_redis.set_lock = AsyncMock(return_value=0.005)
+            mock_redis.unset_lock = AsyncMock(return_value=0.005)
+            mock_redis.clear_connections = AsyncMock()
 
             lock_manager = Aioredlock(internal_lock_timeout=1)
             lock_manager.redis = mock_redis
@@ -315,12 +305,9 @@ class TestAioredlock:
     @pytest.mark.asyncio
     async def test_auto_extend_with_extend_failed(self):
         with patch("aioredlock.algorithm.Redis") as mock_redis:
-            mock_redis.set_lock.return_value = asyncio.Future()
-            mock_redis.set_lock.return_value.set_result(0.005)
-            mock_redis.unset_lock.return_value = asyncio.Future()
-            mock_redis.unset_lock.return_value.set_result(0.005)
-            mock_redis.clear_connections.return_value = asyncio.Future()
-            mock_redis.clear_connections.return_value.set_result(MagicMock())
+            mock_redis.set_lock = AsyncMock(return_value=0.005)
+            mock_redis.unset_lock = AsyncMock(return_Value=0.005)
+            mock_redis.clear_connections = AsyncMock()
 
             lock_manager = Aioredlock(internal_lock_timeout=1.0)
             lock_manager.redis = mock_redis
@@ -333,12 +320,9 @@ class TestAioredlock:
     @pytest.mark.asyncio
     async def test_unlock_with_watchdog_failed(self):
         with patch("aioredlock.algorithm.Redis") as mock_redis:
-            mock_redis.set_lock.return_value = asyncio.Future()
-            mock_redis.set_lock.return_value.set_result(0.005)
-            mock_redis.unset_lock.return_value = asyncio.Future()
-            mock_redis.unset_lock.return_value.set_result(0.005)
-            mock_redis.clear_connections.return_value = asyncio.Future()
-            mock_redis.clear_connections.return_value.set_result(MagicMock())
+            mock_redis.set_lock = AsyncMock(return_value=0.005)
+            mock_redis.unset_lock = AsyncMock(return_value=0.005)
+            mock_redis.clear_connections = AsyncMock()
 
             lock_manager = Aioredlock(internal_lock_timeout=1.0)
             lock_manager.redis = mock_redis
@@ -363,8 +347,7 @@ class TestAioredlock:
         self, lock_manager_redis_patched, locked_lock, unlocked_lock
     ):
         lock_manager, redis = lock_manager_redis_patched
-        redis.is_locked.return_value = asyncio.Future()
-        redis.is_locked.return_value.set_result(True)
+        redis.is_locked = AsyncMock(return_value=True)
 
         locks = await lock_manager.get_active_locks()
 
@@ -374,8 +357,7 @@ class TestAioredlock:
     @pytest.mark.asyncio
     async def test_get_lock(self, lock_manager_redis_patched, locked_lock):
         lock_manager, redis = lock_manager_redis_patched
-        redis.get_lock_ttl.return_value = asyncio.Future()
-        redis.get_lock_ttl.return_value.set_result(-1)
+        redis.get_lock_ttl = AsyncMock(return_value=-1)
 
         lock = await lock_manager.get_lock("resource_name", 1)
         assert lock == locked_lock
