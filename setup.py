@@ -23,8 +23,6 @@ setup(
         "Topic :: Software Development :: Libraries :: Python Modules",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.7",
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
@@ -32,7 +30,7 @@ setup(
     ],
     keywords="redis redlock distributed locks asyncio",
     packages=find_packages(),
-    python_requires=">=3.6",
+    python_requires=">=3.9",
     install_requires=["redis>=5.0.0", "attrs >= 17.4.0"],
     extras_require={
         "test": [
