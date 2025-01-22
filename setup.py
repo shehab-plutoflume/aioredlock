@@ -34,7 +34,7 @@ setup(
     install_requires=["redis>=5.0.0", "attrs >= 17.4.0"],
     extras_require={
         "test": [
-            "pytest>=8.0.0",
+            "pytest<=8.0.0",
             "pytest-asyncio",
             "pytest-mock",
             "pytest-cov",
