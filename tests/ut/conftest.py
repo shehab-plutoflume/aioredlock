@@ -31,8 +31,10 @@ def unlocked_lock(lock_manager_redis_patched):
 
 @pytest.fixture
 def lock_manager_redis_patched():
-    with patch("aioredlock.algorithm.Redis") as mock_redis, \
-            patch("asyncio.sleep", dummy_sleep):
+    with (
+        patch("aioredlock.algorithm.Redis") as mock_redis,
+        patch("asyncio.sleep", dummy_sleep),
+    ):
         mock_redis.set_lock.return_value = asyncio.Future()
         mock_redis.set_lock.return_value.set_result(0.005)
         mock_redis.unset_lock.return_value = asyncio.Future()
@@ -42,7 +44,9 @@ def lock_manager_redis_patched():
         mock_redis.clear_connections.return_value = asyncio.Future()
         mock_redis.clear_connections.return_value.set_result(MagicMock())
         mock_redis.get_lock_ttl.return_value = asyncio.Future()
-        mock_redis.get_lock_ttl.return_value.set_result(Lock(None, "resource_name", 1, -1, True))
+        mock_redis.get_lock_ttl.return_value.set_result(
+            Lock(None, "resource_name", 1, -1, True)
+        )
 
         lock_manager = Aioredlock(internal_lock_timeout=1.0)
         lock_manager.redis = mock_redis
@@ -52,13 +56,14 @@ def lock_manager_redis_patched():
 
 @pytest.fixture
 def aioredlock_patched():
-    with patch("aioredlock.algorithm.Aioredlock", MagicMock) as mock_aioredlock, \
-            patch("asyncio.sleep", dummy_sleep):
+    with (
+        patch("aioredlock.algorithm.Aioredlock", MagicMock) as mock_aioredlock,
+        patch("asyncio.sleep", dummy_sleep),
+    ):
 
         async def dummy_lock(resource):
             lock_identifier = str(uuid.uuid4())
-            return Lock(mock_aioredlock, resource,
-                        lock_identifier, valid=True)
+            return Lock(mock_aioredlock, resource, lock_identifier, valid=True)
 
         mock_aioredlock.lock = MagicMock(side_effect=dummy_lock)
         mock_aioredlock.extend = MagicMock(return_value=asyncio.Future())
@@ -74,7 +79,7 @@ def aioredlock_patched():
 @pytest.fixture
 def ssl_context():
     context = ssl.create_default_context()
-    with patch('ssl.create_default_context', return_value=context):
+    with patch("ssl.create_default_context", return_value=context):
         yield context
 
 
@@ -82,4 +87,5 @@ def ssl_context():
 def fake_coro():
     async def func(thing):
         return thing
+
     return func

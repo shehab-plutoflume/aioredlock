@@ -3,7 +3,6 @@ import attr
 
 @attr.s
 class Lock:
-
     lock_manager = attr.ib()
     resource = attr.ib()
     id = attr.ib()

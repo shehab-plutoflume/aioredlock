@@ -2,10 +2,11 @@ import asyncio
 import logging
 import re
 import time
-from distutils.version import StrictVersion
+
 from itertools import groupby
 
-import aioredis
+from redis import asyncio as aioredis
+from redis.exceptions import NoScriptError, RedisError
 
 from aioredlock.errors import LockError, LockAcquiringError, LockRuntimeError
 from aioredlock.sentinel import Sentinel
@@ -29,7 +30,6 @@ def raise_error(results, default_message):
 
 
 class Instance:
-
     # KEYS[1] - lock resource key
     # ARGS[1] - lock unique identifier
     # ARGS[2] - expiration time in milliseconds
@@ -110,25 +110,38 @@ class Instance:
             aioredis.create_pool(*args, **kwargs)
         """
 
-        if StrictVersion(aioredis.__version__) >= StrictVersion('1.0.0'):  # pragma no cover
-            return await aioredis.create_redis_pool(*args, **kwargs)
-        else:  # pragma no cover
-            return await aioredis.create_pool(*args, **kwargs)
+        # if parse_version(aioredis.__version__) >= parse_version('1.0.0'):  # pragma no cover
+        redis_pool = aioredis.BlockingConnectionPool.from_url(*args, **kwargs)
+        return await redis_pool
+        # return await aioredis.create_redis_pool(*args, **kwargs)
+        # else:  # pragma no cover
+        #     return await aioredis.create_pool(*args, **kwargs)
+
+    def _evalsha(self, redis, sha, keys, args):
+        return redis.evalsha(
+            sha,
+            len(keys),
+            *keys,
+            *args,
+        )
 
     async def _register_scripts(self, redis):
         tasks = []
         for script in [
-                self.SET_LOCK_SCRIPT,
-                self.UNSET_LOCK_SCRIPT,
-                self.GET_LOCK_TTL_SCRIPT,
+            self.SET_LOCK_SCRIPT,
+            self.UNSET_LOCK_SCRIPT,
+            self.GET_LOCK_TTL_SCRIPT,
         ]:
-            script = re.sub(r'^\s+', '', script, flags=re.M).strip()
+            script = re.sub(r"^\s+", "", script, flags=re.M).strip()
             tasks.append(redis.script_load(script))
         (
             self.set_lock_script_sha1,
             self.unset_lock_script_sha1,
             self.get_lock_ttl_script_sha1,
-        ) = (r.decode() if isinstance(r, bytes) else r for r in await asyncio.gather(*tasks))
+        ) = (
+            r.decode() if isinstance(r, bytes) else r
+            for r in await asyncio.gather(*tasks)
+        )
 
     async def connect(self):
         """
@@ -142,10 +155,7 @@ class Instance:
             # a dict like {'host': 'localhost', 'port': 6379,
             #              'db': 0, 'password': 'pass'}
             kwargs = self.connection.copy()
-            address = (
-                kwargs.pop('host', 'localhost'),
-                kwargs.pop('port', 6379)
-            )
+            address = (kwargs.pop("host", "localhost"), kwargs.pop("port", 6379))
             redis_kwargs = kwargs
         elif isinstance(self.connection, aioredis.Redis):
             self._pool = self.connection
@@ -156,13 +166,13 @@ class Instance:
             address = self.connection
 
         if self._pool is None:
-            if 'minsize' not in redis_kwargs:
-                redis_kwargs['minsize'] = 1
-            if 'maxsize' not in redis_kwargs:
-                redis_kwargs['maxsize'] = 100
+            if "minsize" not in redis_kwargs:
+                redis_kwargs["minsize"] = 1
+            if "maxsize" not in redis_kwargs:
+                redis_kwargs["maxsize"] = 100
             async with self._lock:
                 if self._pool is None:
-                    self.log.debug('Connecting %s', repr(self))
+                    self.log.debug("Connecting %s", repr(self))
                     self._pool = await self._create_redis_pool(address, **redis_kwargs)
 
         if self.set_lock_script_sha1 is None or self.unset_lock_script_sha1 is None:
@@ -180,7 +190,9 @@ class Instance:
             await self._pool.wait_closed()
         self._pool = None
 
-    async def set_lock(self, resource, lock_identifier, lock_timeout, register_scripts=False):
+    async def set_lock(
+        self, resource, lock_identifier, lock_timeout, register_scripts=False
+    ):
         """
         Lock this instance and set lock expiration time to lock_timeout
         :param resource: redis key to set
@@ -195,28 +207,32 @@ class Instance:
             with await self.connect() as redis:
                 if register_scripts is True:
                     await self._register_scripts(redis)
-                await redis.evalsha(
+                await self._evalsha(
+                    redis,
                     self.set_lock_script_sha1,
                     keys=[resource],
-                    args=[lock_identifier, lock_timeout_ms]
+                    args=[lock_identifier, lock_timeout_ms],
                 )
-        except aioredis.errors.ReplyError as exc:  # script fault
-            if exc.args[0].startswith('NOSCRIPT'):
-                return await self.set_lock(resource, lock_identifier, lock_timeout, register_scripts=True)
-            self.log.debug('Can not set lock "%s" on %s',
-                           resource, repr(self))
-            raise LockAcquiringError('Can not set lock') from exc
-        except (aioredis.errors.RedisError, OSError) as exc:
-            self.log.error('Can not set lock "%s" on %s: %s',
-                           resource, repr(self), repr(exc))
-            raise LockRuntimeError('Can not set lock') from exc
+        # except aioredis.ReplyError as exc:  # script fault
+        except NoScriptError as exc:  # script fault
+            if exc.__class__.__name__ == "NoScriptError" or exc.args[0].startswith(
+                "NOSCRIPT"
+            ):
+                return await self.set_lock(
+                    resource, lock_identifier, lock_timeout, register_scripts=True
+                )
+            self.log.debug('Can not set lock "%s" on %s', resource, repr(self))
+            raise LockAcquiringError("Can not set lock") from exc
+        except (RedisError, OSError) as exc:
+            self.log.error(
+                'Can not set lock "%s" on %s: %s', resource, repr(self), repr(exc)
+            )
+            raise LockRuntimeError("Can not set lock") from exc
         except asyncio.CancelledError:
-            self.log.debug('Lock "%s" is cancelled on %s',
-                           resource, repr(self))
+            self.log.debug('Lock "%s" is cancelled on %s', resource, repr(self))
             raise
         except Exception:
-            self.log.exception('Can not set lock "%s" on %s',
-                               resource, repr(self))
+            self.log.exception('Can not set lock "%s" on %s', resource, repr(self))
             raise
         else:
             self.log.debug('Lock "%s" is set on %s', resource, repr(self))
@@ -233,28 +249,31 @@ class Instance:
             with await self.connect() as redis:
                 if register_scripts is True:
                     await self._register_scripts(redis)
-                ttl = await redis.evalsha(
+                ttl = await self._evalsha(
+                    redis,
                     self.get_lock_ttl_script_sha1,
                     keys=[resource],
-                    args=[lock_identifier]
+                    args=[lock_identifier],
                 )
-        except aioredis.errors.ReplyError as exc:  # script fault
-            if exc.args[0].startswith('NOSCRIPT'):
-                return await self.get_lock_ttl(resource, lock_identifier, register_scripts=True)
-            self.log.debug('Can not get lock "%s" on %s',
-                           resource, repr(self))
-            raise LockAcquiringError('Can not get lock') from exc
-        except (aioredis.errors.RedisError, OSError) as exc:
-            self.log.error('Can not get lock "%s" on %s: %s',
-                           resource, repr(self), repr(exc))
-            raise LockRuntimeError('Can not get lock') from exc
+        except NoScriptError as exc:  # script fault
+            if exc.__class__.__name__ == "NoScriptError" or exc.args[0].startswith(
+                "NOSCRIPT"
+            ):
+                return await self.get_lock_ttl(
+                    resource, lock_identifier, register_scripts=True
+                )
+            self.log.debug('Can not get lock "%s" on %s', resource, repr(self))
+            raise LockAcquiringError("Can not get lock") from exc
+        except (RedisError, OSError) as exc:
+            self.log.error(
+                'Can not get lock "%s" on %s: %s', resource, repr(self), repr(exc)
+            )
+            raise LockRuntimeError("Can not get lock") from exc
         except asyncio.CancelledError:
-            self.log.debug('Lock "%s" is cancelled on %s',
-                           resource, repr(self))
+            self.log.debug('Lock "%s" is cancelled on %s', resource, repr(self))
             raise
         except Exception:
-            self.log.exception('Can not get lock "%s" on %s',
-                               resource, repr(self))
+            self.log.exception('Can not get lock "%s" on %s', resource, repr(self))
             raise
         else:
             self.log.debug('Lock "%s" with TTL %s is on %s', resource, ttl, repr(self))
@@ -271,28 +290,31 @@ class Instance:
             with await self.connect() as redis:
                 if register_scripts is True:
                     await self._register_scripts(redis)
-                await redis.evalsha(
+                await self._evalsha(
+                    redis,
                     self.unset_lock_script_sha1,
                     keys=[resource],
-                    args=[lock_identifier]
+                    args=[lock_identifier],
                 )
-        except aioredis.errors.ReplyError as exc:  # script fault
-            if exc.args[0].startswith('NOSCRIPT'):
-                return await self.unset_lock(resource, lock_identifier, register_scripts=True)
-            self.log.debug('Can not unset lock "%s" on %s',
-                           resource, repr(self))
-            raise LockAcquiringError('Can not unset lock') from exc
-        except (aioredis.errors.RedisError, OSError) as exc:
-            self.log.error('Can not unset lock "%s" on %s: %s',
-                           resource, repr(self), repr(exc))
-            raise LockRuntimeError('Can not unset lock') from exc
+        except NoScriptError as exc:  # script fault
+            if exc.__class__.__name__ == "NoScriptError" or exc.args[0].startswith(
+                "NOSCRIPT"
+            ):
+                return await self.unset_lock(
+                    resource, lock_identifier, register_scripts=True
+                )
+            self.log.debug('Can not unset lock "%s" on %s', resource, repr(self))
+            raise LockAcquiringError("Can not unset lock") from exc
+        except (RedisError, OSError) as exc:
+            self.log.error(
+                'Can not unset lock "%s" on %s: %s', resource, repr(self), repr(exc)
+            )
+            raise LockRuntimeError("Can not unset lock") from exc
         except asyncio.CancelledError:
-            self.log.debug('Lock "%s" unset is cancelled on %s',
-                           resource, repr(self))
+            self.log.debug('Lock "%s" unset is cancelled on %s', resource, repr(self))
             raise
         except Exception:
-            self.log.exception('Can not unset lock "%s" on %s',
-                               resource, repr(self))
+            self.log.exception('Can not unset lock "%s" on %s', resource, repr(self))
             raise
         else:
             self.log.debug('Lock "%s" is unset on %s', resource, repr(self))
@@ -314,9 +336,7 @@ class Instance:
 
 
 class Redis:
-
     def __init__(self, redis_connections):
-
         self.instances = []
         for connection in redis_connections:
             self.instances.append(Instance(connection))
@@ -339,17 +359,25 @@ class Redis:
         """
         start_time = time.monotonic()
 
-        successes = await asyncio.gather(*[
-            i.set_lock(resource, lock_identifier, lock_timeout) for
-            i in self.instances
-        ], return_exceptions=True)
+        successes = await asyncio.gather(
+            *[
+                i.set_lock(resource, lock_identifier, lock_timeout)
+                for i in self.instances
+            ],
+            return_exceptions=True,
+        )
         successful_sets = sum(s is None for s in successes)
 
         elapsed_time = time.monotonic() - start_time
         locked = successful_sets >= int(len(self.instances) / 2) + 1
 
-        self.log.debug('Lock "%s" is set on %d/%d instances in %s seconds',
-                       resource, successful_sets, len(self.instances), elapsed_time)
+        self.log.debug(
+            'Lock "%s" is set on %d/%d instances in %s seconds',
+            resource,
+            successful_sets,
+            len(self.instances),
+            elapsed_time,
+        )
 
         if not locked:
             raise_error(successes, 'Can not acquire the lock "%s"' % resource)
@@ -367,18 +395,23 @@ class Redis:
             been set to at least (N/2 + 1) instances
         """
         start_time = time.monotonic()
-        successes = await asyncio.gather(*[
-            i.get_lock_ttl(resource, lock_identifier) for
-            i in self.instances
-        ], return_exceptions=True)
+        successes = await asyncio.gather(
+            *[i.get_lock_ttl(resource, lock_identifier) for i in self.instances],
+            return_exceptions=True,
+        )
         successful_list = [s for s in successes if not isinstance(s, Exception)]
         # should check if all the value are approx. the same with math.isclose...
         locked = len(successful_list) >= int(len(self.instances) / 2) + 1
         success = all_equal(successful_list) and locked
         elapsed_time = time.monotonic() - start_time
 
-        self.log.debug('Lock "%s" is set on %d/%d instances in %s seconds',
-                       resource, len(successful_list), len(self.instances), elapsed_time)
+        self.log.debug(
+            'Lock "%s" is set on %d/%d instances in %s seconds',
+            resource,
+            len(successful_list),
+            len(self.instances),
+            elapsed_time,
+        )
 
         if not success:
             raise_error(successes, 'Could not fetch the TTL for lock "%s"' % resource)
@@ -397,24 +430,29 @@ class Redis:
         """
 
         if not self.instances:
-            return .0
+            return 0.0
 
         start_time = time.monotonic()
 
-        successes = await asyncio.gather(*[
-            i.unset_lock(resource, lock_identifier) for
-            i in self.instances
-        ], return_exceptions=True)
+        successes = await asyncio.gather(
+            *[i.unset_lock(resource, lock_identifier) for i in self.instances],
+            return_exceptions=True,
+        )
         successful_removes = sum(s is None for s in successes)
 
         elapsed_time = time.monotonic() - start_time
         unlocked = successful_removes >= int(len(self.instances) / 2) + 1
 
-        self.log.debug('Lock "%s" is unset on %d/%d instances in %s seconds',
-                       resource, successful_removes, len(self.instances), elapsed_time)
+        self.log.debug(
+            'Lock "%s" is unset on %d/%d instances in %s seconds',
+            resource,
+            successful_removes,
+            len(self.instances),
+            elapsed_time,
+        )
 
         if not unlocked:
-            raise_error(successes, 'Can not release the lock')
+            raise_error(successes, "Can not release the lock")
 
         return elapsed_time
 
@@ -426,17 +464,15 @@ class Redis:
         :returns: True if locked else False
         """
 
-        successes = await asyncio.gather(*[
-            i.is_locked(resource) for
-            i in self.instances
-        ], return_exceptions=True)
+        successes = await asyncio.gather(
+            *[i.is_locked(resource) for i in self.instances], return_exceptions=True
+        )
         successful_sets = sum(s is True for s in successes)
 
         return successful_sets >= int(len(self.instances) / 2) + 1
 
     async def clear_connections(self):
-
-        self.log.debug('Clearing connection')
+        self.log.debug("Clearing connection")
 
         if self.instances:
             coros = []

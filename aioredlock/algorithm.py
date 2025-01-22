@@ -57,8 +57,7 @@ class Aioredlock:
         return logging.getLogger(__name__)
 
     async def _set_lock(self, resource, lock_identifier, lease_time):
-
-        error = RuntimeError('Retry count less then one')
+        error = RuntimeError("Retry count less then one")
 
         # Proportional drift time to the length of the lock
         # See https://redis.io/topics/distlock#is-the-algorithm-asynchronous for more info
@@ -67,22 +66,23 @@ class Aioredlock:
         try:
             # global try/except to catch CancelledError
             for n in range(self.retry_count):
-                self.log.debug('Acquiring lock "%s" try %d/%d',
-                               resource, n + 1, self.retry_count)
+                self.log.debug(
+                    'Acquiring lock "%s" try %d/%d', resource, n + 1, self.retry_count
+                )
                 if n != 0:
-                    delay = random.uniform(self.retry_delay_min,
-                                           self.retry_delay_max)
+                    delay = random.uniform(self.retry_delay_min, self.retry_delay_max)
                     await asyncio.sleep(delay)
                 try:
-                    elapsed_time = await self.redis.set_lock(resource, lock_identifier, lease_time)
+                    elapsed_time = await self.redis.set_lock(
+                        resource, lock_identifier, lease_time
+                    )
                 except LockError as exc:
                     error = exc
                     continue
 
                 if lease_time - elapsed_time - drift <= 0:
-                    error = LockError('Lock timeout')
-                    self.log.debug('Timeout in acquiring the lock "%s"',
-                                   resource)
+                    error = LockError("Lock timeout")
+                    self.log.debug('Timeout in acquiring the lock "%s"', resource)
                     continue
 
                 error = None
@@ -114,8 +114,7 @@ class Aioredlock:
         try:
             await self.extend(lock)
         except Exception:
-            self.log.debug('Error in extending the lock "%s"',
-                           lock.resource)
+            self.log.debug('Error in extending the lock "%s"', lock.resource)
 
         self._watchdogs[lock.resource] = asyncio.ensure_future(self._auto_extend(lock))
 
@@ -143,7 +142,9 @@ class Aioredlock:
 
         lock = Lock(self, resource, lock_identifier, lock_timeout, valid=True)
         if lock_timeout is None:
-            self._watchdogs[lock.resource] = asyncio.ensure_future(self._auto_extend(lock))
+            self._watchdogs[lock.resource] = asyncio.ensure_future(
+                self._auto_extend(lock)
+            )
         self._locks[resource] = lock
 
         return lock
@@ -161,7 +162,7 @@ class Aioredlock:
         self.log.debug('Extending lock "%s"', lock.resource)
 
         if not lock.valid:
-            raise RuntimeError('Lock is not valid')
+            raise RuntimeError("Lock is not valid")
         if lock_timeout is not None and lock_timeout <= 0:
             raise ValueError("Lock timeout must be greater than 0 seconds.")
 
@@ -218,8 +219,9 @@ class Aioredlock:
             resource = resource_or_lock
         else:
             raise TypeError(
-                'Argument should be ether aioredlock.Lock instance or string, '
-                '%s is given.', type(resource_or_lock)
+                "Argument should be ether aioredlock.Lock instance or string, "
+                "%s is given.",
+                type(resource_or_lock),
             )
 
         return await self.redis.is_locked(resource)
@@ -228,7 +230,7 @@ class Aioredlock:
         """
         cancel all _watchdogs, unlock all locks and Clear all the redis connections
         """
-        self.log.debug('Destroying %s', repr(self))
+        self.log.debug("Destroying %s", repr(self))
 
         for resource, lock in self._locks.copy().items():
             if lock.valid:

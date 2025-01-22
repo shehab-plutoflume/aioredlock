@@ -33,6 +33,7 @@ And then in another terminal run the following command to execute this script.
 .. _Sentinels: https://redis.io/topics/sentinel
 .. _TunTap: https://github.com/AlmirKadric-Published/docker-tuntap-osx
 """
+
 import asyncio
 import logging
 
@@ -48,21 +49,25 @@ async def get_container(name):
 
 async def get_container_ip(name, network=None):
     container = await get_container(name)
-    return container['NetworkSettings']['Networks'][network or 'aioredlock_backend']['IPAddress']
+    return container["NetworkSettings"]["Networks"][network or "aioredlock_backend"][
+        "IPAddress"
+    ]
 
 
 async def lock_context():
-    sentinel_ip = await get_container_ip('aioredlock_sentinel_1')
+    sentinel_ip = await get_container_ip("aioredlock_sentinel_1")
 
-    lock_manager = Aioredlock([
-        Sentinel('redis://{0}:26379/0?master=leader'.format(sentinel_ip)),
-        Sentinel('redis://{0}:26379/1?master=leader'.format(sentinel_ip)),
-        Sentinel('redis://{0}:26379/2?master=leader'.format(sentinel_ip)),
-        Sentinel('redis://{0}:26379/3?master=leader'.format(sentinel_ip)),
-    ])
+    lock_manager = Aioredlock(
+        [
+            Sentinel("redis://{0}:26379/0?master=leader".format(sentinel_ip)),
+            Sentinel("redis://{0}:26379/1?master=leader".format(sentinel_ip)),
+            Sentinel("redis://{0}:26379/2?master=leader".format(sentinel_ip)),
+            Sentinel("redis://{0}:26379/3?master=leader".format(sentinel_ip)),
+        ]
+    )
 
     if await lock_manager.is_locked("resource"):
-        print('The resource is already acquired')
+        print("The resource is already acquired")
 
     try:
         # if you dont set your lock's lock_timeout, its lifetime will be automatically extended
@@ -71,7 +76,7 @@ async def lock_context():
             assert await lock_manager.is_locked("resource") is True
 
             # pause leader to simulate a failing node and cause a failover
-            container = await get_container('aioredlock_leader_1')
+            container = await get_container("aioredlock_leader_1")
             await container.pause()
 
             # Do your stuff having the lock
@@ -85,9 +90,9 @@ async def lock_context():
 
         assert lock.valid is False  # lock will be released by context manager
     except LockAcquiringError:
-        print('Something happened during normal operation. We just log it.')
+        print("Something happened during normal operation. We just log it.")
     except LockError:
-        print('Something is really wrong and we prefer to raise the exception')
+        print("Something is really wrong and we prefer to raise the exception")
         raise
 
     assert lock.valid is False

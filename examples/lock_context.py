@@ -5,15 +5,17 @@ from aioredlock import Aioredlock, LockError, LockAcquiringError
 
 
 async def lock_context():
-    lock_manager = Aioredlock([
-        'redis://localhost:6379/0',
-        'redis://localhost:6379/1',
-        'redis://localhost:6379/2',
-        'redis://localhost:6379/3',
-    ])
+    lock_manager = Aioredlock(
+        [
+            "redis://localhost:6379/0",
+            "redis://localhost:6379/1",
+            "redis://localhost:6379/2",
+            "redis://localhost:6379/3",
+        ]
+    )
 
     if await lock_manager.is_locked("resource"):
-        print('The resource is already acquired')
+        print("The resource is already acquired")
 
     try:
         # if you dont set your lock's lock_timeout, its lifetime will be automatically extended
@@ -30,9 +32,9 @@ async def lock_context():
 
         assert lock.valid is False  # lock will be released by context manager
     except LockAcquiringError:
-        print('Something happened during normal operation. We just log it.')
+        print("Something happened during normal operation. We just log it.")
     except LockError:
-        print('Something is really wrong and we prefer to raise the exception')
+        print("Something is really wrong and we prefer to raise the exception")
         raise
 
     assert lock.valid is False

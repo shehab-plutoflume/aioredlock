@@ -2,7 +2,7 @@ import asyncio
 import unittest.mock
 import uuid
 
-import aioredis
+from redis import asyncio as aioredis
 import pytest
 
 from aioredlock import Aioredlock, LockError
@@ -10,19 +10,18 @@ from aioredlock import Aioredlock, LockError
 
 @pytest.fixture
 def redis_one_connection():
-    return [{'host': 'localhost', 'port': 6379, 'db': 0}]
+    return [{"host": "localhost", "port": 6379, "db": 0}]
 
 
 @pytest.fixture
 def redis_two_connections():
     return [
-        {'host': 'localhost', 'port': 6379, 'db': 0},
-        {'host': 'localhost', 'port': 6379, 'db': 1}
+        {"host": "localhost", "port": 6379, "db": 0},
+        {"host": "localhost", "port": 6379, "db": 1},
     ]
 
 
 class TestAioredlock:
-
     async def check_simple_lock(self, lock_manager):
         resource = str(uuid.uuid4())
 
@@ -90,68 +89,57 @@ class TestAioredlock:
         await lock_manager.destroy()
 
     @pytest.mark.asyncio
-    async def test_simple_aioredlock_one_instance(
-            self,
-            redis_one_connection):
-
+    async def test_simple_aioredlock_one_instance(self, redis_one_connection):
         await self.check_simple_lock(Aioredlock(redis_one_connection))
 
     @pytest.mark.asyncio
-    async def test_simple_aioredlock_one_instance_pool(
-            self,
-            redis_one_connection):
-        address = 'redis://{host}:{port}/{db}'.format(**redis_one_connection[0])
-        pool = await aioredis.create_redis_pool(address=address, encoding='utf-8')
+    async def test_simple_aioredlock_one_instance_pool(self, redis_one_connection):
+        address = "redis://{host}:{port}/{db}".format(**redis_one_connection[0])
+        pool = await aioredis.create_redis_pool(address=address, encoding="utf-8")
         await self.check_simple_lock(Aioredlock([pool]))
 
     @pytest.mark.asyncio
     async def test_aioredlock_two_locks_on_different_resources_one_instance(
-            self,
-            redis_one_connection):
-
-        await self.check_two_locks_on_different_resources(Aioredlock(redis_one_connection))
+        self, redis_one_connection
+    ):
+        await self.check_two_locks_on_different_resources(
+            Aioredlock(redis_one_connection)
+        )
 
     @pytest.mark.asyncio
     async def test_aioredlock_two_locks_on_same_resource_one_instance(
-            self,
-            redis_one_connection):
-
+        self, redis_one_connection
+    ):
         await self.check_two_locks_on_same_resource(Aioredlock(redis_one_connection))
 
     @pytest.mark.asyncio
-    async def test_simple_aioredlock_two_instances(
-            self,
-            redis_two_connections):
-
+    async def test_simple_aioredlock_two_instances(self, redis_two_connections):
         await self.check_simple_lock(Aioredlock(redis_two_connections))
 
     @pytest.mark.asyncio
     async def test_aioredlock_two_locks_on_different_resources_two_instances(
-            self,
-            redis_two_connections):
-
-        await self.check_two_locks_on_different_resources(Aioredlock(redis_two_connections))
+        self, redis_two_connections
+    ):
+        await self.check_two_locks_on_different_resources(
+            Aioredlock(redis_two_connections)
+        )
 
     @pytest.mark.asyncio
     async def test_aioredlock_two_locks_on_same_resource_two_instances(
-            self,
-            redis_two_connections):
-
+        self, redis_two_connections
+    ):
         await self.check_two_locks_on_same_resource(Aioredlock(redis_two_connections))
 
     @pytest.mark.asyncio
     async def test_aioredlock_lock_with_first_failed_try_two_instances(
-        self,
-        redis_two_connections
+        self, redis_two_connections
     ):
-
         lock_manager = Aioredlock(redis_two_connections)
         resource = str(uuid.uuid4())
-        garbage_value = 'garbage'
+        garbage_value = "garbage"
 
         first_redis = await aioredis.create_redis(
-            (redis_two_connections[0]['host'],
-             redis_two_connections[0]['port'])
+            (redis_two_connections[0]["host"], redis_two_connections[0]["port"])
         )
 
         # write garbage to resource key in first instance
@@ -163,7 +151,6 @@ class TestAioredlock:
         real_sleep = asyncio.sleep
 
         async def fake_sleep(delay):
-
             nonlocal is_garbage
 
             # remove garbage on sleep

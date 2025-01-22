@@ -15,14 +15,19 @@ def test_cleans_details_with_password():
     details = {"foo": "bar", "password": "topsecret"}
     cleaned = clean_password(details)
 
-    assert json.loads(cleaned.replace("'", "\"")) == {'foo': 'bar', 'password': '*******'}
+    assert json.loads(cleaned.replace("'", '"')) == {
+        "foo": "bar",
+        "password": "*******",
+    }
 
 
 def test_cleans_details_with_password_in_list():
     details = [{"foo": "bar", "password": "topsecret"}]
     cleaned = clean_password(details)
 
-    assert json.loads(cleaned.replace("'", "\"")) == [{'foo': 'bar', 'password': '*******'}]
+    assert json.loads(cleaned.replace("'", '"')) == [
+        {"foo": "bar", "password": "*******"}
+    ]
 
 
 def test_ignores_non_dsn_string():
