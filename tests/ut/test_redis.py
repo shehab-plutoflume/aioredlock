@@ -183,12 +183,12 @@ class TestInstance:
     async def test_connect_pool_aioredis_instance(self, mocker, fake_client):
         pool = AsyncMock(spec=ConnectionPool)
         pool.connection_kwargs = {
-        'host': 'localhost',
-        'port': 6379,
-        'db': 0,
-        'password': 'secret'
+            "host": "localhost",
+            "port": 6379,
+            "db": 0,
+            "password": "secret",
         }
-        mocker.patch('redis.asyncio.ConnectionPool', return_value=pool)
+        mocker.patch("redis.asyncio.ConnectionPool", return_value=pool)
 
         mocker.patch("redis.asyncio.Redis.from_url", return_value=fake_client)
         instance = Instance(pool)
